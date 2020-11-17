@@ -1,53 +1,73 @@
-"""Computes Tanimoto similarity between ligands in PDBbind general and core sets
+"""Computes fingerprint Tanimoto coefficients between the ligands in the PDBbind dataset.
+
+Usage:
+    compute_ligand_similarity.py [-h] <pdb_list_file> <pdbbind_dir> <output_file>
+
+Arguments:
+    pdb_list_file   file containing pdb codes of complexes to use
+    pdbbind_dir     top-level directory of the PDBbind data set
+    output_file     file to save the computed features to
+
+Options:
+    -h --help       show this message and exit
+
+Computes Tanimoto coefficient between Morgan fingerprints (radius 2; 2048 bits) of
+the ligands of the specified complexes from the PDBbind data set
+and saves the results to the specified file in .csv format.
 
 """
-import json
-import pathlib
+import os
 
-from rdkit import Chem, DataStructs
+import pandas as pd
+
+from docopt import docopt
+from rdkit import Chem
+from rdkit import DataStructs
+from rdkit import RDLogger
 from rdkit.Chem import AllChem
 from rdkit.Chem.rdMolDescriptors import GetMorganFingerprint
 
-mols = {}
-fingerprints = {}
-test_pdbs = {}
+def main():
 
-for l in test_ligands:
-    pdbs = [pdb for pdb, _ in ligand_groups[l] if pdb in binding_data.index]
+    lg = RDLogger.logger()
+    lg.setLevel(RDLogger.CRITICAL)
+
+    # parse command line arguments
+    args = docopt(__doc__)
+    pdb_list_file = args['<pdb_list_file>']
+    pdbbind_dir = args['<pdbbind_dir>']
+    output_file = args['<output_file>']
+
+    with open(pdb_list_file, 'r') as f:
+        pdbs = [l.strip() for l in f]
+
+    # load ligands and compute features
+    fingerprints = {}
     for pdb in pdbs:
-        src = f'/data/griffin/fboyles/pdbbind_2017/{pdb}/{pdb}_ligand.sdf'
-        mol = next(Chem.SDMolSupplier(src))
+        # prefer to use the .sdf provided by PDBbind
+        sdf = os.path.join(pdbbind_dir, pdb, f'{pdb}_ligand.sdf')
+        mol = next(Chem.SDMolSupplier(sdf, removeHs=False))
+
+        # but we'll try the .mol2 if RDKit can't parse the .sdf
         if mol is None:
-            src = f'/data/griffin/fboyles/pdbbind_2017/{pdb}/{pdb}_ligand.mol2'
-            mol = Chem.MolFromMol2File(src)
-        if mol:
-            mols[l] = mol
-            fingerprints[l] = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048)
-            test_pdbs[l] = pdb
-            break
+            mol2 = os.path.join(pdbbind_dir, pdb, f'{pdb}_ligand.mol2')
+            mol = Chem.MolFromMol2File(mol2, removeHs=False)
 
-all_mols = {}
-all_fps = {}
+        # skip the ligand if RDKit can't parse the .mol2
+        if mol is None:
+            continue
 
-for pdb in binding_data.index:
-    src = f'/data/griffin/fboyles/pdbbind_2017/{pdb}/{pdb}_ligand.sdf'
-    mol = next(Chem.SDMolSupplier(src))
-    if mol is None:
-        src = f'/data/griffin/fboyles/pdbbind_2017/{pdb}/{pdb}_ligand.mol2'
-        mol = Chem.MolFromMol2File(src)
-    all_mols[pdb] = mol
-    all_fps[pdb] = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048)
+        try:
+            fingerprints[pdb] = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048)
+        except ValueError as e:
+            print(e)
+            continue
 
-similarity = {}
+    tc = {pdb1: {pdb2: DataStructs.FingerprintSimilarity(fingerprints[pdb1], fingerprints[pdb2]) for pdb2 in fingerprints} for pdb1 in fingerprints}
 
-for pdb1 in binding_data.index:
-    similarity[pdb1] = {}
-    for pdb2 in binding_data.index:
-        similarity[pdb1][pdb2] = DataStructs.FingerprintSimilarity(all_fps[pdb1], all_fps[pdb2])
-        
-mapper = {test_pdbs[l]: l for l in test_pdbs}
-similarity_df = pd.DataFrame.from_dict(similarity).loc[:,[test_pdbs[l] for l in test_pdbs]].rename(mapper=mapper, axis='columns')
+    tc = pd.DataFrame(tc)
+    tc.to_csv(output_file)
 
-similarity_df.to_csv('pdbbind_2017_general_ligand_tc.csv')
-with open('lbap_test_pdbs.json', 'w') as f:
-    json.dump(test_pdbs, f)
+
+if __name__=='__main__':
+    main()
